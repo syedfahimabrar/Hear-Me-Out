@@ -339,6 +339,7 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
     sentinel = object()
     worker_stop = threading.Event()
     stop = asyncio.Event()
+    flush_evt = asyncio.Event()   # set when the model stops speaking -> flush the audio tail
     out_pcm_buf = np.array([], dtype=np.float32)
     pcm16_buf = np.array([], dtype=np.float32)
 
@@ -354,6 +355,7 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
 
         def worker():
             n = 0
+            prev_listen = True
             try:
                 while not worker_stop.is_set():
                     try:
@@ -368,6 +370,9 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
                     logger.info("[chunk %d] is_listen=%s text=%r", n, is_listen, (text or "")[:60])
                     if text:
                         loop.call_soon_threadsafe(text_q.put_nowait, text)
+                    if is_listen and not prev_listen:        # utterance just ended -> flush tail
+                        loop.call_soon_threadsafe(flush_evt.set)
+                    prev_listen = is_listen
             except Exception as e:
                 loop.call_soon_threadsafe(text_q.put_nowait, e)
             finally:
@@ -438,6 +443,11 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
                 audio = await loop.run_in_executor(None, omni.collect_new_audio)
                 if audio is not None and len(audio):
                     await send_opus(audio)
+                if flush_evt.is_set():
+                    # utterance ended: grab any last wav, then flush the Opus tail promptly
+                    tail = await loop.run_in_executor(None, omni.collect_new_audio)
+                    await send_opus(tail if tail is not None else np.array([], dtype=np.float32), flush=True)
+                    flush_evt.clear()
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.1)
                 except asyncio.TimeoutError:
