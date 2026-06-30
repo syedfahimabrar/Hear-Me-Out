@@ -69,7 +69,9 @@ LLAMA_OMNI_BIN = os.environ.get(
 GGUF_DIR = os.environ.get("MINICPM_O_GGUF_DIR", "")             # dir with LLM + tts/ audio/ token2wav-gguf/
 LLM_FILE = os.environ.get("MINICPM_O_LLM", "MiniCPM-o-4_5-Q4_K_M.gguf")
 CPP_PORT = int(os.environ.get("MINICPM_O_CPP_PORT", "19080"))
-CTX_SIZE = int(os.environ.get("MINICPM_O_CTX", "8192"))
+CTX_SIZE = int(os.environ.get("MINICPM_O_CTX", "32768"))  # official cpp_backend default; the
+# duplex KV cache grows over the whole conversation and is never trimmed, so too small a ctx
+# fills after ~2 turns of (heavy) audio tokens and the model sticks in is_listen=True forever.
 N_GPU_LAYERS = int(os.environ.get("MINICPM_O_NGL", "99"))
 LENGTH_PENALTY = float(os.environ.get("MINICPM_O_LENGTH_PENALTY", "1.1"))
 

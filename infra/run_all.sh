@@ -96,6 +96,10 @@ if [ "$SPEECH_LM_ENGINE" = "minicpm_o" ]; then
     export MINICPM_O_GGUF_DIR="${MINICPM_O_GGUF_DIR:-$WORKSPACE/models/minicpm-o-gguf}"
     export MINICPM_O_LLM="${MINICPM_O_LLM:-MiniCPM-o-4_5-Q4_K_M.gguf}"
     export MINICPM_O_CPP_PORT="${MINICPM_O_CPP_PORT:-19080}"
+    # Match the official cpp_backend ctx (32768). The duplex KV cache is never trimmed, so a
+    # small ctx fills after ~2 turns of audio tokens and the model wedges in listen mode.
+    # ~4.6GB KV at Q4 — still fits on the 24GB card alongside TTS + X-VC.
+    export MINICPM_O_CTX="${MINICPM_O_CTX:-32768}"
     export MINICPM_REF_AUDIO="${MINICPM_REF_AUDIO:-$HEARMEOUT_DIR/recordings/Target_2.wav}"
     export MINICPM_O_OUTPUT_DIR="${MINICPM_O_OUTPUT_DIR:-$SERVICES/minicpm_o/_omni_out}"
     # llama-server (CUDA build) needs its cudart at runtime — and it MUST match the toolkit
