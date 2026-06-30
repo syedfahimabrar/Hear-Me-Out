@@ -460,16 +460,21 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
 
         worker_fut = loop.run_in_executor(None, worker)
         poller = asyncio.create_task(wav_poller())
+        text_task = asyncio.create_task(text_sender())
         try:
-            await asyncio.gather(reader(), text_sender())
+            # reader() returns when the browser disconnects -> that is the SOLE teardown
+            # trigger. text_sender/poller run as background tasks we cancel below; we must
+            # NOT await text_sender here (it only ends on the worker's sentinel, which only
+            # comes after worker_stop is set in this finally -> that would deadlock and the
+            # session would never release _session_lock, hanging the next connection).
+            await reader()
         finally:
             worker_stop.set()
             stop.set()
-            # break_ FIRST: the worker thread may be blocked inside omni.decode()'s
-            # SSE request (it only checks worker_stop between chunks), so interrupt the
-            # in-flight decode server-side so the thread can return. This whole session
-            # holds _session_lock, so if cleanup hangs the next connection can never get
-            # the lock and the frontend sticks on "connecting". Bound every await too.
+            # break_ FIRST: the worker thread may be blocked inside omni.decode()'s SSE
+            # request (it only checks worker_stop between chunks), so interrupt the in-flight
+            # decode server-side so the thread can return. Bound every await so the lock is
+            # always released.
             try:
                 await loop.run_in_executor(None, omni.break_, "disconnect")
             except Exception as e:
@@ -478,12 +483,13 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
                 await asyncio.wait_for(asyncio.shield(worker_fut), timeout=10)
             except (asyncio.TimeoutError, Exception):
                 logger.warning("[chat] worker did not stop in time")
-            if not poller.done():
-                poller.cancel()
-            try:
-                await poller
-            except (asyncio.CancelledError, Exception):
-                pass
+            for t in (poller, text_task):
+                if not t.done():
+                    t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
             if not ws.closed:
                 await ws.close()
 
