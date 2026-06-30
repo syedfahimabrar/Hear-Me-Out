@@ -198,23 +198,46 @@ class LlamaOmni:
         self.cur_prompt = text_prompt
         logger.info("omni_init ok (duplex, prompt=%r)", (text_prompt or "")[:60])
 
+    def update_session_config(self, text_prompt: str):
+        """Official 'new session' reset (cpp_backend _call_update_session_config): break +
+        update_session_config CLEARS the LLM/TTS KV cache and re-prefills the system prompt,
+        so a reconnect starts from a clean context instead of inheriting the previous
+        conversation. A bare break_ does NOT clear the KV -> the new session was wedged with
+        the old (possibly stuck) context. Do NOT send voice_audio here (the C++ server
+        corrupts its media_type if voice_audio is present in update_session_config; omni_init
+        already set the voice and the TTS state is retained)."""
+        prompts = build_prompts(text_prompt)
+        try:
+            requests.post(f"{self.url}/v1/stream/break", json={"reason": "session_config_change"},
+                          timeout=10, proxies=_NO_PROXY)
+        except Exception as e:
+            logger.warning("break before update_session_config failed: %s", e)
+        time.sleep(0.1)
+        body = {
+            "media_type": 2, "duplex_mode": True,
+            "voice_clone_prompt": prompts["voice_clone_prompt"],
+            "assistant_prompt": prompts["assistant_prompt"],
+        }
+        r = requests.post(f"{self.url}/v1/stream/update_session_config", json=body,
+                          timeout=30, proxies=_NO_PROXY)
+        if r.status_code != 200:
+            raise RuntimeError(f"update_session_config failed: {r.text}")
+        self.cur_prompt = text_prompt
+        logger.info("update_session_config ok (clean session, prompt=%r)", (text_prompt or "")[:60])
+
     def begin_session(self, text_prompt: str):
-        """Per-connection clean start. If the persona prompt changed, restart the
-        server + omni_init (the stable clean-state path in cpp_backend.full_reinit);
-        otherwise reset counters/output and reuse the loaded model."""
+        """Per-connection clean start. First connection after a server (re)start reuses the
+        fresh omni_init state as-is; every later connection does the official new-session
+        reset (update_session_config) so it starts from a clean KV cache and re-prefilled
+        system prompt -- which also applies a changed persona without a 6s server restart."""
         self._reset_output()
         self.cnt = 0
         self.sent_wavs = set()
         if self.proc is None or self.proc.poll() is not None:
             self.start_server()
             self.omni_init(text_prompt)
-        elif text_prompt != self.cur_prompt:
-            logger.info("prompt changed -> full reinit")
-            self.stop_server()
-            self.start_server()
-            self.omni_init(text_prompt)
         else:
-            self.break_("new_session")
+            self.update_session_config(text_prompt)
 
     def _reset_output(self):
         d = os.path.join(OUTPUT_DIR, "tts_wav")
@@ -367,9 +390,11 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
                     if chunk is None:
                         break
                     n += 1
+                    rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) if len(chunk) else 0.0
                     omni.prefill(chunk)
                     text, is_listen = omni.decode()
-                    logger.info("[chunk %d] is_listen=%s text=%r", n, is_listen, (text or "")[:60])
+                    logger.info("[chunk %d] in_rms=%.4f is_listen=%s text=%r",
+                                n, rms, is_listen, (text or "")[:60])
                     if text:
                         loop.call_soon_threadsafe(text_q.put_nowait, text)
                     if is_listen and not prev_listen:        # utterance just ended -> flush tail
